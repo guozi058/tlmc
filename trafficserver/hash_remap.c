@@ -33,17 +33,20 @@ Example for the use with The Last Mile Cache at an ISP:s customer, located in Ka
 regex_map http://(.*)/ http://kaa.k.se.$0/ @plugin=hash_remap.so @pparam=tlmc.isp.example
 
 A request for http://www.example/ will result an request from this TS of 
-http://{hash}.{a domain name here}/ 
+http://{hash-fnv64-of-host-and-path}{hash-fnv32-of-host}.{a domain name here}/ 
 
 which in our example would be:
 
-http://24d4dc434ba8a1da.tlmc.isp.example/
+http://24d4dc434ba8a1da5ca26f5a.tlmc.isp.example/
 
 If the plugin fail to set the new host it will fail back to:
 http://kaa.k.se.www.example/
 
 
 To test the hash function; Take the source from their homepage, compile and run:
+
+./fnv132 -s www.example
+0x5ca26f5a
 
 ./fnv164 -s www.example
 0x24d4dc434ba8a1da
@@ -52,9 +55,14 @@ The path is appended without any '/' so
 
 http://www.example/hello/world 
 
-is hashed as:
+would be 
+
+http://627da9c298545b235ca26f5a.tlmc.isp.example/
+
+and is hashed as:
 
 ./fnv164 -s www.examplehello/world
+0x627da9c298545b23
 
 */
 
@@ -68,6 +76,7 @@ is hashed as:
 #define PLUGIN_NAME "hash_remap"
 
 /* function prototypes */
+uint32_t hash_fnv32(char *buf, size_t len);
 uint64_t hash_fnv64(char *buf, size_t len);
 void hash_fnv64_continue(char *buf, size_t len, uint64_t *hval);
 
@@ -103,7 +112,7 @@ int TSRemapNewInstance(int argc, char *argv[], void **ih, char *errbuf, int errb
     hash->isp_name = TSstrdup(argv[2]);
     hash->isp_name_len = strlen(hash->isp_name);
 
-    hash->hash_len = (sizeof(uint64_t) * 1) * 2 + hash->isp_name_len + 1;
+    hash->hash_len = (sizeof(uint64_t) + sizeof(uint32_t)) * 2 + hash->isp_name_len + 1;
     hash->hash = TSmalloc(hash->hash_len); //length of one hash value and a dot and isp_name...
 
     *ih = (void*) hash;
@@ -145,11 +154,13 @@ TSRemapStatus TSRemapDoRemap(void* ih, TSHttpTxn rh, TSRemapRequestInfo *rri) {
     const char* req_host = TSUrlHostGet(rri->requestBufp, rri->requestUrl, &req_host_len);
     const char* req_path = TSUrlPathGet(rri->requestBufp, rri->requestUrl, &req_path_len);
 
-    uint64_t hash_value = hash_fnv64((char *) req_host, req_host_len);
-    hash_fnv64_continue((char *) req_path, req_path_len, &hash_value);
+    uint32_t hash_value_host = hash_fnv32((char *) req_host, req_host_len);
+
+    uint64_t hash_value_host_and_path = hash_fnv64((char *) req_host, req_host_len);
+    hash_fnv64_continue((char *) req_path, req_path_len, &hash_value_host_and_path);
 
     memset(hash->hash, 0, hash->hash_len);
-    int len = sprintf(hash->hash, "%lx.%.*s", hash_value, hash->isp_name_len, hash->isp_name);
+    int len = sprintf(hash->hash, "%lx%x.%.*s", hash_value_host_and_path, hash_value_host, hash->isp_name_len, hash->isp_name);
 
     if (len > hash->hash_len) {
         TSError(PLUGIN_NAME "Memory probably corrupt :whistle:");
@@ -170,6 +181,17 @@ TSRemapStatus TSRemapDoRemap(void* ih, TSHttpTxn rh, TSRemapRequestInfo *rri) {
 
 /* FNV (Fowler/Noll/Vo) hash
    (description: http://www.isthe.com/chongo/tech/comp/fnv/index.html) */
+uint32_t hash_fnv32(char *buf, size_t len) {
+    uint32_t hval = (uint32_t)0x811c9dc5; /* FNV1_32_INIT */
+
+    for (; len > 0; --len) {
+        hval *= (uint32_t)0x01000193;  /* FNV_32_PRIME */
+        hval ^= (uint32_t)*buf++;
+    }
+
+    return hval;
+}
+
 uint64_t hash_fnv64(char *buf, size_t len) {
     uint64_t hval = (uint64_t)0xcbf29ce484222325ULL; /* FNV1_64_INIT */
 
